@@ -1,0 +1,31 @@
+name: CorePvP
+version: 9.4.0
+main: CorePvP\Main
+api: 5.0.0
+commands:
+  kit:
+    description: Admin Kit Menu
+    permission: corepvp.command.kit
+  stat:
+    description: Status
+    permission: corepvp.command.stat
+  shop:
+    description: Open Item Shop
+    permission: corepvp.command.shop
+  forcestart:
+    description: Force start game
+    permission: corepvp.command.forcestart
+  hub:
+    description: Teleport to Hub
+    permission: corepvp.command.hub
+permissions:
+  corepvp.command.kit:
+    default: op
+  corepvp.command.stat:
+    default: true
+  corepvp.command.shop:
+    default: true
+  corepvp.command.forcestart:
+    default: op
+  corepvp.command.hub:
+    default: true
