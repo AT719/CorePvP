@@ -80,7 +80,7 @@ class Main extends PluginBase implements Listener {
     protected function onEnable(): void {
         $this->getServer()->getPluginManager()->registerEvents($this, $this);
         $this->db = new Config($this->getDataFolder() . "players.json", Config::JSON);
-        $this->getLogger()->info("§aCorePvP v10.7 (OP Check Fix) Loaded!");
+        $this->getLogger()->info("§aCorePvP v10.8 (Full Fix) Loaded!");
 
         $this->getScheduler()->scheduleRepeatingTask(new ClosureTask(function (): void {
             $this->gameLoop();
@@ -123,9 +123,16 @@ class Main extends PluginBase implements Listener {
         }
     }
 
+    // --- 💀 死亡時の処理 (アイテム維持) ---
     public function onDeath(PlayerDeathEvent $event): void {
+        // アイテムをばら撒かない
         $event->setDrops([]); 
         $event->setXpDropAmount(0);
+
+        // 試合中なら、インベントリの中身を維持する (KeepInventory)
+        if ($this->gameState === self::STATE_GAME) {
+            $event->setKeepInventory(true);
+        }
     }
 
     public function onRespawn(PlayerRespawnEvent $event): void {
@@ -143,16 +150,12 @@ class Main extends PluginBase implements Listener {
         }
     }
 
-    // --- 修正箇所: isOp() を getServer()->isOp() に変更 ---
     public function onBreak(BlockBreakEvent $event): void {
         $p = $event->getPlayer();
         $block = $event->getBlock();
-        
         $name = $p->getName();
-        // Minerスキル判定などはここ
 
         if ($this->gameState !== self::STATE_GAME) {
-            // ★修正
             if (!$this->getServer()->isOp($name)) { $event->cancel(); $p->sendPopup("§c権限がありません"); }
             return; 
         }
@@ -160,20 +163,16 @@ class Main extends PluginBase implements Listener {
             $this->handleCoreBreak($p, $block, $event);
             return;
         }
-        // ★修正
         if (!$this->getServer()->isOp($name)) { $event->cancel(); }
     }
 
     public function onPlace(BlockPlaceEvent $event): void {
         $p = $event->getPlayer();
         $name = $p->getName();
-
         if ($this->gameState !== self::STATE_GAME) {
-            // ★修正
             if (!$this->getServer()->isOp($name)) { $event->cancel(); $p->sendPopup("§c権限がありません"); }
             return;
         }
-        // ★修正
         if (!$this->getServer()->isOp($name)) { $event->cancel(); }
     }
 
@@ -183,7 +182,6 @@ class Main extends PluginBase implements Listener {
         if ($this->teamData["red"]["core"] !== null && $pos->equals($this->teamData["red"]["core"])) $targetTeam = "red";
         if ($this->teamData["blue"]["core"] !== null && $pos->equals($this->teamData["blue"]["core"])) $targetTeam = "blue";
         if ($targetTeam === null) {
-            // ★修正
             if (!$this->getServer()->isOp($p->getName())) $event->cancel();
             return;
         }
@@ -298,10 +296,7 @@ class Main extends PluginBase implements Listener {
             $p->teleport(new Vector3($pos[0], $pos[1], $pos[2]));
             $p->setGamemode(GameMode::SURVIVAL());
             $p->sendMessage("§l§aGame Start! You are in §" . ($team === "red" ? "cRed" : "9Blue") . " §aTeam!");
-            
-            // ★音の確認: random.levelup は動くはずですが、聞こえない場合は音量を強調
             $this->playSound($p, "random.levelup", 1.0, 1.0);
-            
             $this->applyKit($p, "default");
         }
         $this->getServer()->broadcastMessage("§e[ONPU] §lGame Started! Map: " . $this->decideMap());
@@ -366,7 +361,6 @@ class Main extends PluginBase implements Listener {
                 $p->setGamemode(GameMode::SURVIVAL()); 
                 $this->applyKit($p, "default"); 
                 $p->sendMessage("§a[ONPU] §f戦場に復帰しました！"); 
-                // ★音の確認
                 $this->playSound($p, "random.levelup", 1.0, 1.0); 
                 return; 
             } 
