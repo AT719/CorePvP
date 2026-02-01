@@ -83,7 +83,7 @@ class Main extends PluginBase implements Listener {
     protected function onEnable(): void {
         $this->getServer()->getPluginManager()->registerEvents($this, $this);
         $this->db = new Config($this->getDataFolder() . "players.json", Config::JSON);
-        $this->getLogger()->info("§aCorePvP v11.0 (Chunk Load Fix) Loaded!");
+        $this->getLogger()->info("§aCorePvP v11.1 (Restored All Functions) Loaded!");
 
         $this->getScheduler()->scheduleRepeatingTask(new ClosureTask(function (): void {
             $this->gameLoop();
@@ -184,7 +184,6 @@ class Main extends PluginBase implements Listener {
         }
     }
 
-    // --- ★重要修正: 地形ロードを追加 ---
     private function startGame(): void {
         $this->gameState = self::STATE_GAME;
         $this->currentPhase = 1;
@@ -194,12 +193,10 @@ class Main extends PluginBase implements Listener {
 
         $w = $this->getServer()->getWorldManager()->getDefaultWorld();
         
-        // ★ ここでチャンク（地形）を強制的に読み込む！
         $redX = $this->coords["red_core_pos"][0] >> 4;
         $redZ = $this->coords["red_core_pos"][2] >> 4;
         $blueX = $this->coords["blue_core_pos"][0] >> 4;
         $blueZ = $this->coords["blue_core_pos"][2] >> 4;
-        
         $w->loadChunk($redX, $redZ);
         $w->loadChunk($blueX, $blueZ);
 
@@ -227,8 +224,6 @@ class Main extends PluginBase implements Listener {
                 $pos = $this->coords["blue_spawn"];
             }
             $this->teams[$name] = $team;
-            
-            // スポーン地点のチャンクもロード
             $w->loadChunk($pos[0] >> 4, $pos[2] >> 4);
             
             $p->teleport(new Vector3($pos[0], $pos[1], $pos[2]));
@@ -389,7 +384,6 @@ class Main extends PluginBase implements Listener {
         } 
     }
 
-    // --- その他基本イベント ---
     public function onEntityDamage(EntityDamageEvent $event): void {
         $entity = $event->getEntity();
         if (!$entity instanceof Player) return;
@@ -454,6 +448,26 @@ class Main extends PluginBase implements Listener {
     private function getCooldown(string $name, string $kit): int { if (!isset($this->cooldowns[$name][$kit])) return 0; $remaining = $this->cooldowns[$name][$kit] - time(); return ($remaining > 0) ? $remaining : 0; }
     private function setCooldown(string $name, string $kit, int $seconds): void { $this->cooldowns[$name][$kit] = time() + $seconds; }
     private function addStat(Player $p, string $key, int $amount): void { $data = $this->getPlayerData($p); $data[$key] += $amount; $this->db->set($p->getName(), $data); $this->db->save(); }
+    
+    // ★ 復活させた関数 (ここが消えていました！)
+    private function broadcastSound(string $soundName): void { 
+        foreach ($this->getServer()->getOnlinePlayers() as $p) $this->playSound($p, $soundName); 
+    }
+    
+    // ★ 復活させた関数 (ここが消えていました！)
+    private function sendToHub(Player $p): void { 
+        $pos = $this->coords["hub"]; 
+        $p->teleport(new Vector3($pos[0], $pos[1], $pos[2])); 
+        $p->getInventory()->clearAll(); 
+        $p->getArmorInventory()->clearAll(); 
+        $p->getEffects()->clear(); 
+        $p->setGamemode(GameMode::ADVENTURE()); 
+        $p->sendTitle("§e§lONPU Server", "§fへようこそ！", 10, 60, 20); 
+        $this->playSound($p, "random.orb", 1.0, 1.0); 
+        $this->initScoreboard($p); 
+        $name = $p->getName(); 
+        if (isset($this->queue[$name])) unset($this->queue[$name]); 
+    }
 }
 
 class SimpleForm implements Form {
