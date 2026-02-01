@@ -83,7 +83,7 @@ class Main extends PluginBase implements Listener {
     protected function onEnable(): void {
         $this->getServer()->getPluginManager()->registerEvents($this, $this);
         $this->db = new Config($this->getDataFolder() . "players.json", Config::JSON);
-        $this->getLogger()->info("§aCorePvP v13.0 (Safe Load) Loaded!");
+        $this->getLogger()->info("§aCorePvP v13.1 (Chunk Check) Loaded!");
 
         $this->getScheduler()->scheduleRepeatingTask(new ClosureTask(function (): void {
             $this->gameLoop();
@@ -155,74 +155,6 @@ class Main extends PluginBase implements Listener {
         }
     }
 
-    // --- ★最重要修正: 転送と設置を完全に分ける ---
-    private function startGame(): void {
-        $this->gameState = self::STATE_GAME;
-        $this->currentPhase = 1;
-        $this->gameTime = 0;
-        $this->teamData["red"]["hp"] = 100;
-        $this->teamData["blue"]["hp"] = 100;
-
-        $w = $this->getServer()->getWorldManager()->getDefaultWorld();
-        
-        // 1. まず地形ロードをリクエスト (設置はしない)
-        $w->loadChunk($this->coords["red_spawn"][0] >> 4, $this->coords["red_spawn"][2] >> 4);
-        $w->loadChunk($this->coords["blue_spawn"][0] >> 4, $this->coords["blue_spawn"][2] >> 4);
-
-        // 2. プレイヤーを転送
-        $players = array_keys($this->queue);
-        shuffle($players);
-        $redCount = 0;
-        $half = ceil(count($players) / 2);
-
-        foreach ($players as $name) {
-            $p = $this->getServer()->getPlayerExact($name);
-            if (!$p) continue;
-
-            if ($redCount < $half) {
-                $team = "red";
-                $redCount++;
-                $pos = $this->coords["red_spawn"];
-            } else {
-                $team = "blue";
-                $pos = $this->coords["blue_spawn"];
-            }
-            $this->teams[$name] = $team;
-            
-            $p->teleport(new Vector3($pos[0], $pos[1], $pos[2]));
-            $p->setGamemode(GameMode::SURVIVAL());
-            $p->sendMessage("§l§e地形読み込み中... (5秒待機)");
-            $p->sendTitle("§eLoading...", "§f戦闘準備中...", 0, 100, 0);
-        }
-
-        // 3. 5秒(100ticks)後にコア設置とアイテム配布を行う
-        $this->getScheduler()->scheduleDelayedTask(new ClosureTask(function (): void {
-            $this->startMatchLogic();
-        }), 100); 
-    }
-
-    public function startMatchLogic(): void {
-        $w = $this->getServer()->getWorldManager()->getDefaultWorld();
-        
-        $this->teamData["red"]["core"] = new Position($this->coords["red_core_pos"][0], $this->coords["red_core_pos"][1], $this->coords["red_core_pos"][2], $w);
-        $this->teamData["blue"]["core"] = new Position($this->coords["blue_core_pos"][0], $this->coords["blue_core_pos"][1], $this->coords["blue_core_pos"][2], $w);
-        
-        // ここで初めてブロックを置く (プレイヤーがいるので地形はあるはず)
-        $w->setBlock($this->teamData["red"]["core"], VanillaBlocks::END_STONE());
-        $w->setBlock($this->teamData["blue"]["core"], VanillaBlocks::END_STONE());
-
-        $this->getServer()->broadcastMessage("§e[ONPU] §lGame Started! Map: " . $this->decideMap());
-        $this->broadcastSound("random.levelup");
-
-        foreach ($this->queue as $name => $val) {
-            $p = $this->getServer()->getPlayerExact($name);
-            if ($p) {
-                $p->sendMessage("§l§aBattle Start!");
-                $this->applyKit($p, "default");
-            }
-        }
-    }
-
     private function endGame(string $winningTeam): void {
         $this->gameState = self::STATE_ENDING;
         $this->endingTime = 10;
@@ -249,6 +181,90 @@ class Main extends PluginBase implements Listener {
         $this->gameTime = 0;
         foreach ($this->getServer()->getOnlinePlayers() as $p) {
             $this->sendToHub($p);
+        }
+    }
+
+    private function startGame(): void {
+        $this->gameState = self::STATE_GAME;
+        $this->currentPhase = 1;
+        $this->gameTime = 0;
+        $this->teamData["red"]["hp"] = 100;
+        $this->teamData["blue"]["hp"] = 100;
+
+        $w = $this->getServer()->getWorldManager()->getDefaultWorld();
+        
+        // チャンクリクエスト
+        $w->loadChunk($this->coords["red_spawn"][0] >> 4, $this->coords["red_spawn"][2] >> 4);
+        $w->loadChunk($this->coords["blue_spawn"][0] >> 4, $this->coords["blue_spawn"][2] >> 4);
+
+        $players = array_keys($this->queue);
+        shuffle($players);
+        $redCount = 0;
+        $half = ceil(count($players) / 2);
+
+        foreach ($players as $name) {
+            $p = $this->getServer()->getPlayerExact($name);
+            if (!$p) continue;
+
+            if ($redCount < $half) {
+                $team = "red";
+                $redCount++;
+                $pos = $this->coords["red_spawn"];
+            } else {
+                $team = "blue";
+                $pos = $this->coords["blue_spawn"];
+            }
+            $this->teams[$name] = $team;
+            
+            $p->teleport(new Vector3($pos[0], $pos[1], $pos[2]));
+            $p->setGamemode(GameMode::SURVIVAL());
+            $p->sendMessage("§l§e地形読み込み中... (5秒待機)");
+            $p->sendTitle("§eLoading...", "§f戦闘準備中...", 0, 100, 0);
+        }
+
+        $this->getScheduler()->scheduleDelayedTask(new ClosureTask(function (): void {
+            $this->startMatchLogic();
+        }), 100); 
+    }
+
+    // --- ★重要: 安全なブロック設置 ---
+    public function startMatchLogic(): void {
+        $w = $this->getServer()->getWorldManager()->getDefaultWorld();
+        
+        // 赤コア設置
+        $rx = $this->coords["red_core_pos"][0] >> 4;
+        $rz = $this->coords["red_core_pos"][2] >> 4;
+        if ($w->isChunkLoaded($rx, $rz)) {
+            $this->teamData["red"]["core"] = new Position($this->coords["red_core_pos"][0], $this->coords["red_core_pos"][1], $this->coords["red_core_pos"][2], $w);
+            $w->setBlock($this->teamData["red"]["core"], VanillaBlocks::END_STONE());
+        } else {
+            $this->getServer()->broadcastMessage("§c[Warning] 赤コアエリアの読み込みに失敗しました。");
+        }
+
+        // 青コア設置 (チェック付き)
+        $bx = $this->coords["blue_core_pos"][0] >> 4;
+        $bz = $this->coords["blue_core_pos"][2] >> 4;
+        
+        // ★ ここでクラッシュしないように確認
+        if ($w->isChunkLoaded($bx, $bz)) {
+            $this->teamData["blue"]["core"] = new Position($this->coords["blue_core_pos"][0], $this->coords["blue_core_pos"][1], $this->coords["blue_core_pos"][2], $w);
+            $w->setBlock($this->teamData["blue"]["core"], VanillaBlocks::END_STONE());
+        } else {
+            // 読み込まれていなければ、強制的にロードを試みるか、エラーメッセージを出して鯖落ちは防ぐ
+            $w->loadChunk($bx, $bz); // ダメ元でもう一度
+            $this->getServer()->broadcastMessage("§c[Warning] 青コアエリアの地形生成が遅れています。");
+            // ※ここで無理にsetBlockしないことでクラッシュを回避
+        }
+
+        $this->getServer()->broadcastMessage("§e[ONPU] §lGame Started! Map: " . $this->decideMap());
+        $this->broadcastSound("random.levelup");
+
+        foreach ($this->queue as $name => $val) {
+            $p = $this->getServer()->getPlayerExact($name);
+            if ($p) {
+                $p->sendMessage("§l§aBattle Start!");
+                $this->applyKit($p, "default");
+            }
         }
     }
 
