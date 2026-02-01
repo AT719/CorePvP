@@ -51,15 +51,18 @@ class Main extends PluginBase implements Listener {
     private array $scoreboards = [];
     private array $portalCooldown = [];
 
+    // ゲーム状態定義
     public const STATE_LOBBY = 0;
     public const STATE_WAITING = 1;
-    public const STATE_GAME = 2;
-    public const STATE_ENDING = 3;
+    public const STATE_LOADING = 2; // ★新設: 地形読み込み待ち
+    public const STATE_GAME = 3;
+    public const STATE_ENDING = 4;
     private int $gameState = self::STATE_LOBBY;
     
     private int $currentPhase = 1;
     private int $gameTime = 0;
     private int $endingTime = 0;
+    private int $loadingTime = 0; // ロード待機用
 
     private array $queue = [];
     private array $teams = [];
@@ -83,7 +86,7 @@ class Main extends PluginBase implements Listener {
     protected function onEnable(): void {
         $this->getServer()->getPluginManager()->registerEvents($this, $this);
         $this->db = new Config($this->getDataFolder() . "players.json", Config::JSON);
-        $this->getLogger()->info("§aCorePvP v13.1 (Chunk Check) Loaded!");
+        $this->getLogger()->info("§aCorePvP v14.0 (Full Fix) Loaded!");
 
         $this->getScheduler()->scheduleRepeatingTask(new ClosureTask(function (): void {
             $this->gameLoop();
@@ -92,6 +95,8 @@ class Main extends PluginBase implements Listener {
 
     private function gameLoop(): void {
         $now = time();
+
+        // 1. 待機中
         if ($this->gameState === self::STATE_WAITING) {
             $count = count($this->queue);
             if ($count === 0) {
@@ -103,7 +108,7 @@ class Main extends PluginBase implements Listener {
                     $p = $this->getServer()->getPlayerExact($name);
                     if ($p) $p->sendPopup("§eGame starting in §c" . $this->countdown);
                 }
-                if ($this->countdown <= 0) $this->startGame();
+                if ($this->countdown <= 0) $this->startLoading(); // LOADINGへ移行
             } else {
                 $this->countdown = 30;
                 foreach ($this->queue as $name) {
@@ -113,6 +118,37 @@ class Main extends PluginBase implements Listener {
             }
         }
 
+        // 2. ★ロード中 (地形生成待ち)
+        if ($this->gameState === self::STATE_LOADING) {
+            $this->loadingTime++;
+            $w = $this->getServer()->getWorldManager()->getDefaultWorld();
+            
+            // 必要なチャンク座標
+            $rx = $this->coords["red_core_pos"][0] >> 4; $rz = $this->coords["red_core_pos"][2] >> 4;
+            $bx = $this->coords["blue_core_pos"][0] >> 4; $bz = $this->coords["blue_core_pos"][2] >> 4;
+
+            // ロード命令を出し続ける
+            $w->loadChunk($rx, $rz);
+            $w->loadChunk($bx, $bz);
+
+            // 読み込み完了確認
+            if ($w->isChunkLoaded($rx, $rz) && $w->isChunkLoaded($bx, $bz)) {
+                $this->startGame(); // 準備完了なら試合開始
+            } else {
+                // まだなら待機メッセージ
+                foreach ($this->getServer()->getOnlinePlayers() as $p) {
+                    if (isset($this->teams[$p->getName()])) {
+                        $p->sendPopup("§e地形生成中... (" . $this->loadingTime . "s)");
+                    }
+                }
+                // 30秒待ってもダメなら強制開始 (無限ループ防止)
+                if ($this->loadingTime > 30) {
+                    $this->startGame();
+                }
+            }
+        }
+
+        // 3. 試合中
         if ($this->gameState === self::STATE_GAME) {
             $this->gameTime++;
             if ($this->gameTime === 600 && $this->currentPhase === 1) {
@@ -127,6 +163,7 @@ class Main extends PluginBase implements Listener {
             }
         }
 
+        // 4. エンディング
         if ($this->gameState === self::STATE_ENDING) {
             $this->endingTime--;
             foreach ($this->getServer()->getOnlinePlayers() as $p) {
@@ -141,6 +178,7 @@ class Main extends PluginBase implements Listener {
             }
         }
 
+        // スコアボード更新
         foreach ($this->getServer()->getOnlinePlayers() as $player) {
             $this->updateScoreboard($player);
             $name = $player->getName();
@@ -155,119 +193,68 @@ class Main extends PluginBase implements Listener {
         }
     }
 
-    private function endGame(string $winningTeam): void {
-        $this->gameState = self::STATE_ENDING;
-        $this->endingTime = 10;
-        $colorCode = ($winningTeam === "red") ? "§c" : "§9";
-        $teamName = ($winningTeam === "red") ? "赤" : "青";
-        foreach ($this->getServer()->getOnlinePlayers() as $p) {
-            $p->sendTitle($colorCode . "§l" . $teamName . "チームの勝利！", "§fGG!", 10, 100, 20);
-            $this->playSound($p, "random.totem", 1.0, 1.0);
-            $p->setGamemode(GameMode::ADVENTURE());
-            $p->getEffects()->clear();
-        }
-    }
-
-    private function finalizeGame(): void {
-        $this->gameState = self::STATE_LOBBY;
+    // --- Loading開始 ---
+    private function startLoading(): void {
+        $this->gameState = self::STATE_LOADING;
+        $this->loadingTime = 0;
         $this->teamData["red"]["hp"] = 100;
         $this->teamData["blue"]["hp"] = 100;
-        $this->queue = [];
-        $this->teams = [];
-        $this->playerKit = [];
-        $this->activeSkills = [];
-        $this->cooldowns = [];
-        $this->currentPhase = 1;
-        $this->gameTime = 0;
-        foreach ($this->getServer()->getOnlinePlayers() as $p) {
-            $this->sendToHub($p);
-        }
-    }
-
-    private function startGame(): void {
-        $this->gameState = self::STATE_GAME;
-        $this->currentPhase = 1;
-        $this->gameTime = 0;
-        $this->teamData["red"]["hp"] = 100;
-        $this->teamData["blue"]["hp"] = 100;
-
-        $w = $this->getServer()->getWorldManager()->getDefaultWorld();
-        
-        // チャンクリクエスト
-        $w->loadChunk($this->coords["red_spawn"][0] >> 4, $this->coords["red_spawn"][2] >> 4);
-        $w->loadChunk($this->coords["blue_spawn"][0] >> 4, $this->coords["blue_spawn"][2] >> 4);
 
         $players = array_keys($this->queue);
         shuffle($players);
-        $redCount = 0;
-        $half = ceil(count($players) / 2);
-
+        
+        $i = 0;
         foreach ($players as $name) {
             $p = $this->getServer()->getPlayerExact($name);
             if (!$p) continue;
 
-            if ($redCount < $half) {
-                $team = "red";
-                $redCount++;
-                $pos = $this->coords["red_spawn"];
-            } else {
-                $team = "blue";
-                $pos = $this->coords["blue_spawn"];
-            }
+            // ★修正: チーム分け (0=Red, 1=Blue, 2=Red...)
+            $team = ($i % 2 === 0) ? "red" : "blue";
             $this->teams[$name] = $team;
-            
+            $i++;
+
+            $pos = ($team === "red") ? $this->coords["red_spawn"] : $this->coords["blue_spawn"];
             $p->teleport(new Vector3($pos[0], $pos[1], $pos[2]));
             $p->setGamemode(GameMode::SURVIVAL());
-            $p->sendMessage("§l§e地形読み込み中... (5秒待機)");
-            $p->sendTitle("§eLoading...", "§f戦闘準備中...", 0, 100, 0);
+            
+            // 所属チームをデカデカと表示
+            $color = ($team === "red") ? "§cRED" : "§9BLUE";
+            $p->sendTitle("§l" . $color . " TEAM", "§f地形生成を待機中...", 10, 100, 20);
+            
+            // ★重要: KitもNoneに戻す
+            $this->playerKit[$name] = "None";
+            $this->updateScoreboard($p);
         }
-
-        $this->getScheduler()->scheduleDelayedTask(new ClosureTask(function (): void {
-            $this->startMatchLogic();
-        }), 100); 
     }
 
-    // --- ★重要: 安全なブロック設置 ---
-    public function startMatchLogic(): void {
+    // --- 試合開始 (Loading完了後) ---
+    private function startGame(): void {
+        $this->gameState = self::STATE_GAME;
+        $this->currentPhase = 1;
+        $this->gameTime = 0;
+
         $w = $this->getServer()->getWorldManager()->getDefaultWorld();
         
-        // 赤コア設置
-        $rx = $this->coords["red_core_pos"][0] >> 4;
-        $rz = $this->coords["red_core_pos"][2] >> 4;
-        if ($w->isChunkLoaded($rx, $rz)) {
-            $this->teamData["red"]["core"] = new Position($this->coords["red_core_pos"][0], $this->coords["red_core_pos"][1], $this->coords["red_core_pos"][2], $w);
-            $w->setBlock($this->teamData["red"]["core"], VanillaBlocks::END_STONE());
-        } else {
-            $this->getServer()->broadcastMessage("§c[Warning] 赤コアエリアの読み込みに失敗しました。");
-        }
-
-        // 青コア設置 (チェック付き)
-        $bx = $this->coords["blue_core_pos"][0] >> 4;
-        $bz = $this->coords["blue_core_pos"][2] >> 4;
+        // コア設置
+        $this->teamData["red"]["core"] = new Position($this->coords["red_core_pos"][0], $this->coords["red_core_pos"][1], $this->coords["red_core_pos"][2], $w);
+        $this->teamData["blue"]["core"] = new Position($this->coords["blue_core_pos"][0], $this->coords["blue_core_pos"][1], $this->coords["blue_core_pos"][2], $w);
         
-        // ★ ここでクラッシュしないように確認
-        if ($w->isChunkLoaded($bx, $bz)) {
-            $this->teamData["blue"]["core"] = new Position($this->coords["blue_core_pos"][0], $this->coords["blue_core_pos"][1], $this->coords["blue_core_pos"][2], $w);
-            $w->setBlock($this->teamData["blue"]["core"], VanillaBlocks::END_STONE());
-        } else {
-            // 読み込まれていなければ、強制的にロードを試みるか、エラーメッセージを出して鯖落ちは防ぐ
-            $w->loadChunk($bx, $bz); // ダメ元でもう一度
-            $this->getServer()->broadcastMessage("§c[Warning] 青コアエリアの地形生成が遅れています。");
-            // ※ここで無理にsetBlockしないことでクラッシュを回避
-        }
+        $w->setBlock($this->teamData["red"]["core"], VanillaBlocks::END_STONE());
+        $w->setBlock($this->teamData["blue"]["core"], VanillaBlocks::END_STONE());
 
         $this->getServer()->broadcastMessage("§e[ONPU] §lGame Started! Map: " . $this->decideMap());
         $this->broadcastSound("random.levelup");
 
-        foreach ($this->queue as $name => $val) {
+        foreach ($this->teams as $name => $team) {
             $p = $this->getServer()->getPlayerExact($name);
             if ($p) {
                 $p->sendMessage("§l§aBattle Start!");
-                $this->applyKit($p, "default");
+                $this->applyKit($p, "default"); // Kit配布
             }
         }
     }
 
+    // --- コア破壊 (ドロップなし修正) ---
     private function handleCoreBreak(Player $p, $block, BlockBreakEvent $event): void {
         $targetTeam = null;
         $pos = $block->getPosition();
@@ -279,7 +266,10 @@ class Main extends PluginBase implements Listener {
             return;
         }
 
-        $event->cancel();
+        // ★修正: 絶対にアイテム化させない
+        $event->cancel(); 
+        $event->setDrops([]); 
+
         $myTeam = $this->teams[$p->getName()] ?? "";
         if ($myTeam === $targetTeam) {
             $p->sendMessage("§c味方のコアは攻撃できません！");
@@ -305,19 +295,44 @@ class Main extends PluginBase implements Listener {
         }
     }
 
+    // --- スコアボード (Noneバグ修正) ---
     private function updateScoreboard(Player $player): void {
         $name = $player->getName();
         $data = $this->getPlayerData($player);
+        
+        // 配列にキーがない場合は "None"
         $kitName = isset($this->playerKit[$name]) ? ucfirst($this->playerKit[$name]) : "None";
         $team = isset($this->teams[$name]) ? ucfirst($this->teams[$name]) : "None";
-        $lines = ["§r ", "§fname: " . $name, "§fmoney: " . $data["money"], "§fkill: " . $data["kills"], "§fkit: " . $kitName, "§fteam: " . $team];
-        if ($this->gameState === self::STATE_GAME || $this->gameState === self::STATE_ENDING) {
+        
+        $lines = [
+            "§r ",
+            "§fname: " . $name,
+            "§fmoney: " . $data["money"],
+            "§fkill: " . $data["kills"],
+            "§fkit: " . $kitName,
+            "§fteam: " . $team
+        ];
+
+        if ($this->gameState === self::STATE_GAME || $this->gameState === self::STATE_ENDING || $this->gameState === self::STATE_LOADING) {
             $lines[] = "§e----------------";
             $lines[] = "§cRed HP : " . $this->teamData["red"]["hp"];
             $lines[] = "§9Blue HP: " . $this->teamData["blue"]["hp"];
-            if ($this->gameState === self::STATE_ENDING) { $lines[] = "§6★ VICTORY! ★"; } else { $lines[] = "§ePhase  : " . $this->currentPhase; }
-        } else { $lines[] = "§e----------------"; $lines[] = "§7Lobby"; }
-        $pk = new SetScorePacket(); $pk->type = SetScorePacket::TYPE_CHANGE; $pk->entries = [];
+            
+            if ($this->gameState === self::STATE_ENDING) {
+                $lines[] = "§6★ VICTORY! ★";
+            } elseif ($this->gameState === self::STATE_LOADING) {
+                $lines[] = "§eLoading...";
+            } else {
+                $lines[] = "§ePhase  : " . $this->currentPhase;
+            }
+        } else {
+            $lines[] = "§e----------------";
+            $lines[] = "§7Lobby";
+        }
+
+        $pk = new SetScorePacket();
+        $pk->type = SetScorePacket::TYPE_CHANGE;
+        $pk->entries = [];
         foreach ($lines as $score => $line) {
             $entry = new ScorePacketEntry();
             $entry->objectiveName = "onpu_board";
@@ -330,6 +345,7 @@ class Main extends PluginBase implements Listener {
         $player->getNetworkSession()->sendDataPacket($pk);
     }
 
+    // --- その他イベント・機能 ---
     public function onCommand(CommandSender $sender, Command $command, string $label, array $args): bool {
         if (!$sender instanceof Player) return false;
         switch ($command->getName()) {
@@ -337,13 +353,43 @@ class Main extends PluginBase implements Listener {
             case "kit": $sender->sendMessage("§cKitコマンドは無効化されています。"); return true;
             case "forcestart":
                 if (!$sender->hasPermission("corepvp.command.forcestart")) return false;
-                if (count($this->queue) < 1) { $this->queue[$sender->getName()] = true; $sender->sendMessage("§e[ONPU] §f強制参加・開始します！"); }
-                $this->startGame(); return true;
-            case "stat":
-                $data = $this->getPlayerData($sender);
-                $sender->sendMessage("§fMoney: " . $data["money"]); return true;
+                // 強制開始時、キューに追加してからLoadingへ
+                if (count($this->queue) < 1) { 
+                    $this->queue[$sender->getName()] = true; 
+                    $sender->sendMessage("§e[ONPU] §f強制参加・開始します！"); 
+                }
+                $this->startLoading(); 
+                return true;
+            case "stat": $data = $this->getPlayerData($sender); $sender->sendMessage("§fMoney: " . $data["money"]); return true;
             case "shop": $this->sendShopForm($sender); return true;
         } return false;
+    }
+
+    private function endGame(string $winningTeam): void {
+        $this->gameState = self::STATE_ENDING;
+        $this->endingTime = 10;
+        $colorCode = ($winningTeam === "red") ? "§c" : "§9";
+        $teamName = ($winningTeam === "red") ? "赤" : "青";
+        foreach ($this->getServer()->getOnlinePlayers() as $p) {
+            $p->sendTitle($colorCode . "§l" . $teamName . "チームの勝利！", "§fGG!", 10, 100, 20);
+            $this->playSound($p, "random.totem", 1.0, 1.0);
+            $p->setGamemode(GameMode::ADVENTURE());
+            $p->getEffects()->clear();
+        }
+    }
+
+    private function finalizeGame(): void {
+        $this->gameState = self::STATE_LOBBY;
+        $this->teamData["red"]["hp"] = 100;
+        $this->teamData["blue"]["hp"] = 100;
+        $this->queue = [];
+        $this->teams = [];
+        $this->playerKit = [];
+        $this->activeSkills = [];
+        $this->cooldowns = [];
+        foreach ($this->getServer()->getOnlinePlayers() as $p) {
+            $this->sendToHub($p);
+        }
     }
 
     public function onInteract(PlayerInteractEvent $event): void { 
@@ -445,7 +491,13 @@ class Main extends PluginBase implements Listener {
         if (!$this->getServer()->isOp($name)) { $event->cancel(); }
     }
     public function sendVoteForm(Player $player): void { $form = new SimpleForm(function (Player $player, $data) { if ($data === null) return; $maps = [0 => "Canyon", 1 => "Valley", 2 => "Coastal", 3 => "Skylands"]; if (isset($maps[$data])) { $this->votes[$player->getName()] = $maps[$data]; $player->sendMessage("§a[ONPU] §f" . $maps[$data] . " に投票しました！"); } }); $form->setTitle("Map Vote"); $form->setContent("プレイしたいマップを選んでください"); $form->addButton("Canyon"); $form->addButton("Valley"); $form->addButton("Coastal"); $form->addButton("Skylands"); $player->sendForm($form); }
-    public function onJoin(PlayerJoinEvent $event): void { $p = $event->getPlayer(); $n = $p->getName(); if (!$this->db->exists($n)) { $this->db->set($n, ["money" => 1000, "np" => 500, "kills" => 0, "deaths" => 0, "exp" => 0, "level" => 1]); $this->db->save(); } $this->sendToHub($p); }
+    public function onJoin(PlayerJoinEvent $event): void { 
+        $p = $event->getPlayer(); $n = $p->getName(); 
+        if (!$this->db->exists($n)) { $this->db->set($n, ["money" => 1000, "np" => 500, "kills" => 0, "deaths" => 0, "exp" => 0, "level" => 1]); $this->db->save(); } 
+        // チーム・Kit情報リセット
+        unset($this->teams[$n]); unset($this->playerKit[$n]);
+        $this->sendToHub($p); 
+    }
     public function onMove(PlayerMoveEvent $event): void { $p = $event->getPlayer(); $name = $p->getName(); if ($this->gameState !== self::STATE_GAME) return; if (!isset($this->teams[$name])) return; $block = $p->getWorld()->getBlock($p->getPosition()); if ($block->getTypeId() === VanillaBlocks::NETHER_PORTAL()->getTypeId()) { if (isset($this->portalCooldown[$name]) && time() < $this->portalCooldown[$name]) return; $this->portalCooldown[$name] = time() + 3; $team = $this->teams[$name]; $spawnCoords = ($team === "red") ? $this->coords["red_spawn"] : $this->coords["blue_spawn"]; $p->teleport(new Vector3($spawnCoords[0], $spawnCoords[1], $spawnCoords[2])); $this->playSound($p, "mob.endermen.portal", 1.0, 1.0); $p->sendMessage("§a[ONPU] §f拠点のポータルを使用しました。"); $this->sendKitForm($p); } }
     private function decideMap(): string { if (empty($this->votes)) return "Canyon (Default)"; $counts = array_count_values($this->votes); arsort($counts); return array_key_first($counts); }
     private function setKitItem(Item $item, bool $isSkillBook = false): Item { $item->getNamedTag()->setInt("CorePvP_KitItem", 1); if ($isSkillBook) { $item->getNamedTag()->setInt("CorePvP_SkillBook", 1); } return $item; }
