@@ -51,10 +51,9 @@ class Main extends PluginBase implements Listener {
     private array $scoreboards = [];
     private array $portalCooldown = [];
 
-    // ゲーム状態定義
     public const STATE_LOBBY = 0;
     public const STATE_WAITING = 1;
-    public const STATE_LOADING = 2; // ★新設: 地形読み込み待ち
+    public const STATE_LOADING = 2; 
     public const STATE_GAME = 3;
     public const STATE_ENDING = 4;
     private int $gameState = self::STATE_LOBBY;
@@ -62,7 +61,7 @@ class Main extends PluginBase implements Listener {
     private int $currentPhase = 1;
     private int $gameTime = 0;
     private int $endingTime = 0;
-    private int $loadingTime = 0; // ロード待機用
+    private int $loadingTime = 0;
 
     private array $queue = [];
     private array $teams = [];
@@ -86,7 +85,7 @@ class Main extends PluginBase implements Listener {
     protected function onEnable(): void {
         $this->getServer()->getPluginManager()->registerEvents($this, $this);
         $this->db = new Config($this->getDataFolder() . "players.json", Config::JSON);
-        $this->getLogger()->info("§aCorePvP v14.0 (Full Fix) Loaded!");
+        $this->getLogger()->info("§aCorePvP v14.1 (Safe Mode) Loaded!");
 
         $this->getScheduler()->scheduleRepeatingTask(new ClosureTask(function (): void {
             $this->gameLoop();
@@ -96,7 +95,6 @@ class Main extends PluginBase implements Listener {
     private function gameLoop(): void {
         $now = time();
 
-        // 1. 待機中
         if ($this->gameState === self::STATE_WAITING) {
             $count = count($this->queue);
             if ($count === 0) {
@@ -108,7 +106,7 @@ class Main extends PluginBase implements Listener {
                     $p = $this->getServer()->getPlayerExact($name);
                     if ($p) $p->sendPopup("§eGame starting in §c" . $this->countdown);
                 }
-                if ($this->countdown <= 0) $this->startLoading(); // LOADINGへ移行
+                if ($this->countdown <= 0) $this->startLoading(); 
             } else {
                 $this->countdown = 30;
                 foreach ($this->queue as $name) {
@@ -118,37 +116,36 @@ class Main extends PluginBase implements Listener {
             }
         }
 
-        // 2. ★ロード中 (地形生成待ち)
+        // ★ロード処理の修正
         if ($this->gameState === self::STATE_LOADING) {
             $this->loadingTime++;
             $w = $this->getServer()->getWorldManager()->getDefaultWorld();
             
-            // 必要なチャンク座標
             $rx = $this->coords["red_core_pos"][0] >> 4; $rz = $this->coords["red_core_pos"][2] >> 4;
             $bx = $this->coords["blue_core_pos"][0] >> 4; $bz = $this->coords["blue_core_pos"][2] >> 4;
 
-            // ロード命令を出し続ける
-            $w->loadChunk($rx, $rz);
-            $w->loadChunk($bx, $bz);
+            // 毎秒ロードは重いので2秒に1回
+            if ($this->loadingTime % 2 === 0) {
+                $w->loadChunk($rx, $rz);
+                $w->loadChunk($bx, $bz);
+            }
 
-            // 読み込み完了確認
             if ($w->isChunkLoaded($rx, $rz) && $w->isChunkLoaded($bx, $bz)) {
-                $this->startGame(); // 準備完了なら試合開始
+                $this->startGame(); 
             } else {
-                // まだなら待機メッセージ
                 foreach ($this->getServer()->getOnlinePlayers() as $p) {
                     if (isset($this->teams[$p->getName()])) {
                         $p->sendPopup("§e地形生成中... (" . $this->loadingTime . "s)");
                     }
                 }
-                // 30秒待ってもダメなら強制開始 (無限ループ防止)
+                // ★修正: 30秒待ってもダメならキャンセル (無理に開始しない！)
                 if ($this->loadingTime > 30) {
-                    $this->startGame();
+                    $this->getServer()->broadcastMessage("§c[Error] 地形生成がタイムアウトしました。ロビーに戻ります。");
+                    $this->finalizeGame();
                 }
             }
         }
 
-        // 3. 試合中
         if ($this->gameState === self::STATE_GAME) {
             $this->gameTime++;
             if ($this->gameTime === 600 && $this->currentPhase === 1) {
@@ -163,7 +160,6 @@ class Main extends PluginBase implements Listener {
             }
         }
 
-        // 4. エンディング
         if ($this->gameState === self::STATE_ENDING) {
             $this->endingTime--;
             foreach ($this->getServer()->getOnlinePlayers() as $p) {
@@ -178,7 +174,6 @@ class Main extends PluginBase implements Listener {
             }
         }
 
-        // スコアボード更新
         foreach ($this->getServer()->getOnlinePlayers() as $player) {
             $this->updateScoreboard($player);
             $name = $player->getName();
@@ -193,7 +188,6 @@ class Main extends PluginBase implements Listener {
         }
     }
 
-    // --- Loading開始 ---
     private function startLoading(): void {
         $this->gameState = self::STATE_LOADING;
         $this->loadingTime = 0;
@@ -208,7 +202,6 @@ class Main extends PluginBase implements Listener {
             $p = $this->getServer()->getPlayerExact($name);
             if (!$p) continue;
 
-            // ★修正: チーム分け (0=Red, 1=Blue, 2=Red...)
             $team = ($i % 2 === 0) ? "red" : "blue";
             $this->teams[$name] = $team;
             $i++;
@@ -217,17 +210,14 @@ class Main extends PluginBase implements Listener {
             $p->teleport(new Vector3($pos[0], $pos[1], $pos[2]));
             $p->setGamemode(GameMode::SURVIVAL());
             
-            // 所属チームをデカデカと表示
             $color = ($team === "red") ? "§cRED" : "§9BLUE";
             $p->sendTitle("§l" . $color . " TEAM", "§f地形生成を待機中...", 10, 100, 20);
             
-            // ★重要: KitもNoneに戻す
             $this->playerKit[$name] = "None";
             $this->updateScoreboard($p);
         }
     }
 
-    // --- 試合開始 (Loading完了後) ---
     private function startGame(): void {
         $this->gameState = self::STATE_GAME;
         $this->currentPhase = 1;
@@ -235,10 +225,10 @@ class Main extends PluginBase implements Listener {
 
         $w = $this->getServer()->getWorldManager()->getDefaultWorld();
         
-        // コア設置
         $this->teamData["red"]["core"] = new Position($this->coords["red_core_pos"][0], $this->coords["red_core_pos"][1], $this->coords["red_core_pos"][2], $w);
         $this->teamData["blue"]["core"] = new Position($this->coords["blue_core_pos"][0], $this->coords["blue_core_pos"][1], $this->coords["blue_core_pos"][2], $w);
         
+        // チャンクチェック済みなので安全に置ける
         $w->setBlock($this->teamData["red"]["core"], VanillaBlocks::END_STONE());
         $w->setBlock($this->teamData["blue"]["core"], VanillaBlocks::END_STONE());
 
@@ -249,12 +239,11 @@ class Main extends PluginBase implements Listener {
             $p = $this->getServer()->getPlayerExact($name);
             if ($p) {
                 $p->sendMessage("§l§aBattle Start!");
-                $this->applyKit($p, "default"); // Kit配布
+                $this->applyKit($p, "default");
             }
         }
     }
 
-    // --- コア破壊 (ドロップなし修正) ---
     private function handleCoreBreak(Player $p, $block, BlockBreakEvent $event): void {
         $targetTeam = null;
         $pos = $block->getPosition();
@@ -266,7 +255,6 @@ class Main extends PluginBase implements Listener {
             return;
         }
 
-        // ★修正: 絶対にアイテム化させない
         $event->cancel(); 
         $event->setDrops([]); 
 
@@ -295,12 +283,10 @@ class Main extends PluginBase implements Listener {
         }
     }
 
-    // --- スコアボード (Noneバグ修正) ---
     private function updateScoreboard(Player $player): void {
         $name = $player->getName();
         $data = $this->getPlayerData($player);
         
-        // 配列にキーがない場合は "None"
         $kitName = isset($this->playerKit[$name]) ? ucfirst($this->playerKit[$name]) : "None";
         $team = isset($this->teams[$name]) ? ucfirst($this->teams[$name]) : "None";
         
@@ -345,7 +331,6 @@ class Main extends PluginBase implements Listener {
         $player->getNetworkSession()->sendDataPacket($pk);
     }
 
-    // --- その他イベント・機能 ---
     public function onCommand(CommandSender $sender, Command $command, string $label, array $args): bool {
         if (!$sender instanceof Player) return false;
         switch ($command->getName()) {
@@ -353,7 +338,6 @@ class Main extends PluginBase implements Listener {
             case "kit": $sender->sendMessage("§cKitコマンドは無効化されています。"); return true;
             case "forcestart":
                 if (!$sender->hasPermission("corepvp.command.forcestart")) return false;
-                // 強制開始時、キューに追加してからLoadingへ
                 if (count($this->queue) < 1) { 
                     $this->queue[$sender->getName()] = true; 
                     $sender->sendMessage("§e[ONPU] §f強制参加・開始します！"); 
@@ -494,7 +478,6 @@ class Main extends PluginBase implements Listener {
     public function onJoin(PlayerJoinEvent $event): void { 
         $p = $event->getPlayer(); $n = $p->getName(); 
         if (!$this->db->exists($n)) { $this->db->set($n, ["money" => 1000, "np" => 500, "kills" => 0, "deaths" => 0, "exp" => 0, "level" => 1]); $this->db->save(); } 
-        // チーム・Kit情報リセット
         unset($this->teams[$n]); unset($this->playerKit[$n]);
         $this->sendToHub($p); 
     }
