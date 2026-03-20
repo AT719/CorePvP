@@ -1,31 +1,33 @@
 name: CorePvP
-version: 9.4.0
 main: CorePvP\Main
-api: 5.0.0
+version: 16.0.0
+api: [5.0.0]
+
 commands:
+  hub:
+    description: "ロビーに戻ります"
+    permission: corepvp.command.hub
   kit:
-    description: Admin Kit Menu
+    description: "Kitコマンド"
     permission: corepvp.command.kit
+  forcestart:
+    description: "試合を強制開始します"
+    permission: corepvp.command.forcestart
   stat:
-    description: Status
+    description: "ステータスを確認します"
     permission: corepvp.command.stat
   shop:
-    description: Open Item Shop
+    description: "ショップを開きます"
     permission: corepvp.command.shop
-  forcestart:
-    description: Force start game
-    permission: corepvp.command.forcestart
-  hub:
-    description: Teleport to Hub
-    permission: corepvp.command.hub
+
 permissions:
+  corepvp.command.hub:
+    default: true
   corepvp.command.kit:
-    default: op
+    default: true
   corepvp.command.stat:
     default: true
   corepvp.command.shop:
     default: true
   corepvp.command.forcestart:
     default: op
-  corepvp.command.hub:
-    default: true
