@@ -19,6 +19,21 @@ commands:
   shop:
     description: "ショップを開きます"
     permission: corepvp.command.shop
+  ban:
+    description: "プレイヤーをBANします"
+    permission: corepvp.command.ban
+  warn:
+    description: "プレイヤーに警告を与えます"
+    permission: corepvp.command.warn
+  unwarn:
+    description: "プレイヤーの警告を解除します"
+    permission: corepvp.command.unwarn
+  givemoney:
+    description: "プレイヤーにお金を送金します"
+    permission: corepvp.command.givemoney
+  coordtool:
+    description: "ブロックの座標を確認するツールを取得します"
+    permission: corepvp.command.coordtool
 
 permissions:
   corepvp.command.hub:
@@ -29,5 +44,15 @@ permissions:
     default: true
   corepvp.command.shop:
     default: true
+  corepvp.command.givemoney:
+    default: true
   corepvp.command.forcestart:
+    default: op
+  corepvp.command.ban:
+    default: op
+  corepvp.command.warn:
+    default: op
+  corepvp.command.unwarn:
+    default: op
+  corepvp.command.coordtool:
     default: op

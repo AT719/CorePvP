@@ -4,88 +4,108 @@ namespace CorePvP\Map;
 use CorePvP\Main;
 use pocketmine\player\Player;
 use pocketmine\world\Position;
-use pocketmine\Server;
+use pocketmine\scheduler\ClosureTask;
 
 class MapManager {
     private Main $plugin;
     public array $votes = [];
 
-    // ★ あなたが厳選した16個の試合用マップリスト
     public const MATCH_MAPS = [
-        "desertTemple", "Nature", "oasis", "canyon", "cherokee", "coastal",
+        "DesertTemple", "Nature", "oasis", "Canyon", "Cherokee", "Coastal",
         "Eldor", "Fall", "JokerCity", "Lush", "SkyCastle", "Snow home",
-        "SnowIce", "WoodSky", "WoodField", "Woodfieldv2"
+        "SnowIce", "WoodField", "Woodfieldv2", "WoodSky"
     ];
+
+    // ★ 諸悪の根源だった架空のゴミ配列($coords)は完全に削除しました
 
     public function __construct(Main $plugin) {
         $this->plugin = $plugin;
     }
 
-    // ロビー(NEWHUB-SPRING)の読み込み
     public function loadAllWorlds(): void {
         $wm = $this->plugin->getServer()->getWorldManager();
         if (!$wm->isWorldLoaded("NEWHUB-SPRING")) {
-            $wm->loadWorld("NEWHUB-SPRING");
+            $wm->loadWorld("NEWHUB-SPRING", true);
+        }
+        foreach (self::MATCH_MAPS as $map) {
+            if (!$wm->isWorldLoaded($map)) {
+                $wm->loadWorld($map, true); 
+            }
+            $world = $wm->getWorldByName($map);
+            if ($world !== null) {
+                $world->save(true);
+                $wm->unloadWorld($world);
+            }
         }
     }
 
-    // --- ワールド複製システム（仮想アリーナ生成） ---
-    // 試合開始時に呼ばれ、元のマップを汚さないようにコピー（例: copy_desertTemple_1）を作ります
+    public function getMapCoord(string $mapName, string $key, \pocketmine\world\World $w): Position {
+        // ★ マップ制作者（ねらくん様）が設定した本来のリス地をそのまま取得
+        $spawn = $w->getSpawnLocation();
+        
+        // ★ 以前完璧に動いていた通り、コアの位置だけリス地から±10ずらす
+        if (strpos($key, "red_core") !== false) {
+            return new Position($spawn->getFloorX() + 10, $spawn->getFloorY(), $spawn->getFloorZ(), $w);
+        }
+        if (strpos($key, "blue_core") !== false) {
+            return new Position($spawn->getFloorX() - 10, $spawn->getFloorY(), $spawn->getFloorZ(), $w);
+        }
+        
+        // ★ スポーン地点はねらくん様の設定そのまま
+        return clone $spawn;
+    }
+
     public function prepareArena(string $mapName, int $arenaId): string {
         $server = $this->plugin->getServer();
         $worldManager = $server->getWorldManager();
-        $copyName = "copy_{$mapName}_{$arenaId}";
+        
+        // Windowsのファイル破損対策（ユニーク名生成）は残しています
+        $uniqueId = substr(str_shuffle("abcdefghijklmnopqrstuvwxyz0123456789"), 0, 5);
+        $copyName = "copy_{$mapName}_{$arenaId}_{$uniqueId}";
 
-        // 古いコピーが残っていれば削除
-        if ($worldManager->isWorldLoaded($copyName)) {
-            $worldManager->unloadWorld($worldManager->getWorldByName($copyName));
-        }
-        $this->deleteDirectory($server->getDataPath() . "worlds/" . $copyName);
-
-        // オリジナルからコピーを作成して読み込み
         $this->copyDirectory(
             $server->getDataPath() . "worlds/" . $mapName,
             $server->getDataPath() . "worlds/" . $copyName
         );
 
         $worldManager->loadWorld($copyName);
-        return $copyName; // コピーしたマップの名前を返す
+        return $copyName;
     }
 
-    // 試合終了時にコピーしたマップを完全に消去する
     public function destroyArena(string $copyName): void {
         $server = $this->plugin->getServer();
         $wm = $server->getWorldManager();
         if ($wm->isWorldLoaded($copyName)) {
-            $wm->unloadWorld($wm->getWorldByName($copyName));
+            $world = $wm->getWorldByName($copyName);
+            if ($world !== null) {
+                $wm->unloadWorld($world);
+            }
         }
-        $this->deleteDirectory($server->getDataPath() . "worlds/" . $copyName);
+        
+        $dir = $server->getDataPath() . "worlds/" . $copyName;
+        $this->plugin->getScheduler()->scheduleDelayedTask(new ClosureTask(function() use ($dir): void {
+            $this->deleteDirectory($dir);
+        }), 100); 
     }
 
-    // --- テレポートシステム ---
     public function teleportToHub(Player $player): void {
         $w = $this->plugin->getServer()->getWorldManager()->getWorldByName("NEWHUB-SPRING");
         if ($w) {
-            // 先ほど特定したロビーの固定座標！
             $player->teleport(new Position(267, 71, 248, $w));
         } else {
-            $player->teleport($this->plugin->getServer()->getWorldManager()->getDefaultWorld()->getSafeSpawn());
+            $player->teleport($this->plugin->getServer()->getWorldManager()->getDefaultWorld()->getSpawnLocation());
         }
-    }
-
-    public function teleportToWaiting(Player $player): void {
-        // CorePvPはロビー内でカウントダウンを行うため、Hubと同じ場所に転送します
-        $this->teleportToHub($player);
     }
 
     public function teleportToGame(Player $player, string $copyMapName, string $team): void {
         $w = $this->plugin->getServer()->getWorldManager()->getWorldByName($copyMapName);
         if ($w) {
-            // 各マップの正確なチーム座標が決まるまでは、全員ミッド(SafeSpawn)に飛ばします
-            $spawn = $w->getSafeSpawn();
-            // 奈落(Y=0以下)の場合は上空へ補正
-            $y = $spawn->getY() > 0 ? $spawn->getY() : 100;
-            $player->teleport(new Position($spawn->getX(), $y, $spawn->getZ(), $w));
+            $originalMapName = explode("_", $copyMapName)[1]; 
+            $pos = $this->getMapCoord($originalMapName, $team . "_spawn", $w);
+            $w->loadChunk($pos->getFloorX() >> 4, $pos->getFloorZ() >> 4);
+            $player->teleport($pos);
+        } else {
+            $player->sendMessage("§c[エラー] マップが読み込めませんでした。");
         }
     }
 
@@ -93,24 +113,18 @@ class MapManager {
         $w = $this->plugin->getServer()->getWorldManager()->getWorldByName($copyMapName);
         if ($w === null) return null;
         
-        // とりあえずミッド付近にコアを仮置きします（後で正確な座標が分かったら書き換えます）
-        $spawn = $w->getSafeSpawn();
-        $offsetX = ($team === "red") ? 5 : -5;
-        $y = $spawn->getY() > 0 ? $spawn->getY() : 100;
-        return new Position($spawn->getX() + $offsetX, $y, $spawn->getZ(), $w);
+        $originalMapName = explode("_", $copyMapName)[1]; 
+        return $this->getMapCoord($originalMapName, $team . "_core", $w);
     }
 
-    // --- 投票システム ---
     public function addVote(string $playerName, string $mapName): void {
         $this->votes[$playerName] = $mapName;
     }
 
     public function decideMap(): string {
-        // 誰も投票しなかった場合は16マップの中からランダム
         if (empty($this->votes)) {
             return self::MATCH_MAPS[array_rand(self::MATCH_MAPS)];
         }
-        // 票を集計して1番多いものを返す
         $counts = array_count_values($this->votes);
         arsort($counts);
         return array_key_first($counts);
@@ -120,7 +134,6 @@ class MapManager {
         $this->votes = [];
     }
 
-    // --- ユーティリティ（ファイル操作用・触らなくてOKです） ---
     private function copyDirectory(string $src, string $dst): void {
         if (!is_dir($src)) return;
         @mkdir($dst, 0777, true);
